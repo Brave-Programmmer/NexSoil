@@ -1,5 +1,5 @@
-# NexSoil — A multi-purpose Rover
-![coverimg](https://i.ibb.co/dsQLNKTn/20251103-110700-removebg-preview.png)
+# NexSoil — A Multi-purpose Rover
+![coverimg](./cover_image.png)
 A modular rover ecosystem designed for IoT automation, agriculture monitoring, robotics experimentation, and remote vehicle control, powered by ESP32-CAM / ESP8266 microcontrollers and a Flutter-based controller app.
 
 Supports Bluetooth Classic (SPP) and Wi-Fi AP control with live telemetry, live camera feed, and digital motor control
