@@ -1,6 +1,8 @@
 # NexSoil — A multi-purpose Rover
 
-A Flutter mobile application for controlling ESP-based rovers via Bluetooth Classic (SPP) or Wi-Fi AP. Includes real-time telemetry, camera streaming, and joystick control.
+A modular rover ecosystem designed for IoT automation, agriculture monitoring, robotics experimentation, and remote vehicle control, powered by ESP32-CAM / ESP8266 microcontrollers and a Flutter-based controller app.
+
+Supports Bluetooth Classic (SPP) and Wi-Fi AP control with live telemetry, live camera feed, and digital motor control
 
 [![Flutter](https://img.shields.io/badge/Flutter-%3E%3D3.9.2-blue.svg)](https://flutter.dev)
 [![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://www.android.com)
@@ -19,48 +21,45 @@ A Flutter mobile application for controlling ESP-based rovers via Bluetooth Clas
 - [Wiring Diagrams](#-wiring-diagrams)
 - [HTTP API Examples](#-http-api-examples)
 - [Troubleshooting](#-troubleshooting)
-- [Development](#-development)
-
 ---
 
 ## ✨ Features
 
 - **Dual connectivity**: Bluetooth Classic (SPP) or Wi-Fi AP (HTTP control)
-- **Smart reconnection**: Auto-reconnect with last-device memory
 - **Joystick control**: Smooth analog control with deadzone and throttling
-- **Real-time telemetry**: Temperature, humidity, soil moisture, battery status
-- **Camera streaming**: MJPEG over HTTP or Bluetooth frame streaming
+- **Real-time telemetry**: Temperature, humidity, soil moisture.
+- **Camera streaming**: Bluetooth frame streaming
 - **Manual controls**: Quick-access buttons for basic movements
-- **Watchdog monitoring**: Automatic connection health checks with ping/pong
-
 ---
 
 ## 📁 Repository Structure
-
-```
-nexsoil/
-├── lib/
-│   ├── main.dart                           # App entry point
-│   ├── screens/                            # UI screens
-│   │   ├── control_screen.dart            # Main control interface
-│   │   ├── camera_screen.dart             # Camera/WiFi view
-│   │   └── telemetry_screen.dart          # Telemetry display
-│   ├── widgets/                            # Reusable components
-│   │   ├── joystick.dart                  # Joystick controller
-│   │   ├── device_selection_dialog.dart   # Bluetooth device picker
-│   │   └── camera_view.dart               # Camera stream widget
-│   └── services/                           # Core services
-│       ├── bluetooth_service.dart         # BT/HTTP communication
-│       ├── rover_service.dart             # Rover state management
-│       └── bluetooth_camera_service.dart  # Camera streaming
-├── android/                                # Android platform files
-├── esp12ecode/                            # ESP8266 firmware
+```txt
+├── nexsoil
+│
+│── rover_controller/                      # Flutter App
+│   ├── lib/
+│   │   ├── main.dart                      # App entry point
+│   │   ├── screens/                       # All UI screens
+│   │   │   ├── control_screen.dart        # Main rover control panel
+│   │   │   ├── camera_screen.dart         # Live camera view + Wi-Fi
+│   │   │   └── telemetry_screen.dart      # Soil, temp, humidity dashboard
+│   │   ├── widgets/                       # Shared UI components
+│   │   │   ├── joystick.dart              # Virtual joystick UI
+│   │   │   ├── device_selection_dialog.dart # Bluetooth device picker
+│   │   │   └── camera_view.dart           # RTSP/JPEG streaming viewer
+│   │   └── services/                      # Core logic & integrations
+│   │       ├── bluetooth_service.dart     # Bluetooth control + data TX/RX
+│   │       ├── rover_service.dart         # Rover control & state handling
+│   │       └── bluetooth_camera_service.dart # Bluetooth camera streaming logic
+│   ├── android/                           # Android-specific platform files
+│   └── pubspec.yaml                       # Flutter dependencies list
+│
+│── esp12ecode/                            # ESP8266 rover firmware
 │   └── esp12ecode.ino
-├── esp32code/                             # ESP32-CAM firmware
-│   └── esp32code.ino
-├── pubspec.yaml                           # Flutter dependencies
-└── README.md                              # This file
-```
+│
+└── esp32code/                             # ESP32-CAM firmware
+    └── esp32code.ino
+
 
 ---
 
