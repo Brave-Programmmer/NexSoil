@@ -1,4 +1,4 @@
-# NexSoil — ESP32 Rover Controller
+# NexSoil — A multi-purpose Rover
 
 A Flutter mobile application for controlling ESP-based rovers via Bluetooth Classic (SPP) or Wi-Fi AP. Includes real-time telemetry, camera streaming, and joystick control.
 
