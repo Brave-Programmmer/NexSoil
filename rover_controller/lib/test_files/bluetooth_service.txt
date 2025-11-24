@@ -1,0 +1,689 @@
+import 'dart:async';
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+// network_info_plus removed - not used
+import 'firmware_status.dart';
+import 'telemetry_data.dart';
+
+enum ConnectionType { bluetooth, wifi, none }
+
+/// BluetoothService encapsulates Bluetooth Classic (SPP) connection
+/// to an ESP32 device named "ESP32-Rover". It handles scanning,
+/// connecting, sending commands, receiving telemetry JSON, and
+/// persistence of last connected device.
+class BluetoothService with ChangeNotifier {
+  static const String targetDeviceName = 'ESP32-Rover';
+  static const String prefLastDeviceAddress = 'last_device_address';
+  static const String prefLastDeviceName = 'last_device_name';
+  static const String prefTelemetryInterval = 'telemetry_interval_ms';
+  static const String prefTelemetryEnabled = 'telemetry_enabled';
+  static const String prefTurboEnabled = 'turbo_enabled';
+  static const String prefCalibrationState = 'calibration_state';
+  static const String prefConnectionType = 'connection_type';
+  static const String httpControlUrl = 'http://192.168.4.1/control';
+  static const String wifiApIp = '192.168.4.1';
+  static const String cameraStreamUrl = 'http://192.168.4.1/mjpeg';
+  static const String cameraSnapshotUrl = 'http://192.168.4.1/snapshot';
+
+  final FlutterBluetoothSerial _bluetooth = FlutterBluetoothSerial.instance;
+
+  BluetoothConnection? _connection;
+  StreamSubscription<Uint8List>? _inputSubscription;
+  Timer? _connectionWatchdog;
+  Timer? _wifiCheckTimer;
+  BluetoothState _btState = BluetoothState.UNKNOWN;
+  bool _isScanning = false;
+  bool _isConnecting = false;
+  ConnectionType _connectionType = ConnectionType.none;
+  bool _isWiFiConnected = false;
+  bool _isCheckingWiFi = false;
+  bool _telemetryEnabled = true;
+  bool _turboEnabled = false;
+  bool _isCalibrating = false;
+  int _telemetryIntervalMs = 3000;
+  FirmwareStatus? _lastStatus;
+  int _reconnectAttempts = 0;
+  static const int maxReconnectAttempts = 3;
+
+  // Incoming raw byte buffer for line/JSON framing
+  final List<int> _byteBuffer = <int>[];
+
+  // Telemetry stream
+  final StreamController<RoverTelemetry> _telemetryController =
+      StreamController.broadcast();
+
+  // Status stream (turbo mode, pwm freq, etc)
+  final StreamController<FirmwareStatus> _statusController =
+      StreamController.broadcast();
+
+  // Connection state stream
+  final StreamController<bool> _connectionController =
+      StreamController.broadcast();
+
+  Stream<RoverTelemetry> get telemetryStream => _telemetryController.stream;
+  Stream<FirmwareStatus> get statusStream => _statusController.stream;
+  Stream<bool> get connectionStream => _connectionController.stream;
+
+  bool get isConnected {
+    if (_connectionType == ConnectionType.wifi) {
+      return _isWiFiConnected;
+    }
+    return _connection?.isConnected == true;
+  }
+
+  bool get isScanning => _isScanning;
+  bool get isConnecting => _isConnecting;
+  bool get isCheckingWiFi => _isCheckingWiFi;
+  ConnectionType get connectionType => _connectionType;
+  bool get isWiFiConnected => _isWiFiConnected;
+  bool get isCalibrating => _isCalibrating;
+  bool get turboEnabled => _turboEnabled;
+  BluetoothState get bluetoothState => _btState;
+  bool get telemetryEnabled => _telemetryEnabled;
+  int get telemetryIntervalMs => _telemetryIntervalMs;
+  FirmwareStatus? get lastStatus => _lastStatus;
+  RoverTelemetry? _lastTelemetry;
+  RoverTelemetry? get lastTelemetry => _lastTelemetry;
+  BluetoothDevice? _lastDevice;
+  BluetoothDevice? get lastDevice => _lastDevice;
+  Completer<String>? _pingCompleter;
+
+  Future<void> init() async {
+    _btState = await _bluetooth.state;
+    _bluetooth.onStateChanged().listen((BluetoothState state) {
+      _btState = state;
+      notifyListeners();
+
+      // If Bluetooth is turned off, mark as disconnected
+      if (state == BluetoothState.STATE_OFF &&
+          _connectionType == ConnectionType.bluetooth) {
+        _handleDisconnect();
+      }
+    });
+
+    // Start connection watchdog
+    _startConnectionWatchdog();
+
+    // Start WiFi connectivity checking
+    _startWiFiChecking();
+
+    await _requestPermissions();
+    await _tryAutoReconnect();
+
+    // Try to load saved connection type
+    await _loadConnectionType();
+  }
+
+  void _startWiFiChecking() {
+    _wifiCheckTimer?.cancel();
+    _wifiCheckTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (_connectionType == ConnectionType.wifi ||
+          _connectionType == ConnectionType.none) {
+        await _checkWiFiConnectivity();
+      }
+    });
+  }
+
+  /// Check if device is connected to ESP32 WiFi AP (192.168.4.1)
+  Future<bool> _checkWiFiConnectivity() async {
+    if (_isCheckingWiFi) return _isWiFiConnected;
+
+    _isCheckingWiFi = true;
+    try {
+      // Try to ping the ESP32 via HTTP
+      final uri = Uri.parse('$httpControlUrl?cmd=PING');
+      final response = await http
+          .get(uri)
+          .timeout(
+            const Duration(seconds: 1),
+            onTimeout: () {
+              throw TimeoutException('WiFi check timed out');
+            },
+          );
+
+      final wasConnected = _isWiFiConnected;
+      _isWiFiConnected = response.statusCode == 200;
+
+      if (_isWiFiConnected && !wasConnected) {
+        // WiFi just connected
+        if (_connectionType != ConnectionType.wifi) {
+          _connectionType = ConnectionType.wifi;
+          _connectionController.add(true);
+          notifyListeners();
+          debugPrint('WiFi connected to ESP32');
+        }
+      } else if (!_isWiFiConnected && wasConnected) {
+        // WiFi just disconnected
+        if (_connectionType == ConnectionType.wifi) {
+          _connectionType = ConnectionType.none;
+          _connectionController.add(false);
+          notifyListeners();
+          debugPrint('WiFi disconnected from ESP32');
+        }
+      }
+
+      return _isWiFiConnected;
+    } catch (e) {
+      // Not connected via WiFi
+      if (_isWiFiConnected) {
+        _isWiFiConnected = false;
+        if (_connectionType == ConnectionType.wifi) {
+          _connectionType = ConnectionType.none;
+          _connectionController.add(false);
+          notifyListeners();
+          debugPrint('WiFi disconnected: $e');
+        }
+      }
+      return false;
+    } finally {
+      _isCheckingWiFi = false;
+    }
+  }
+
+  /// Connect via WiFi (check connectivity)
+  Future<void> connectViaWiFi() async {
+    if (_isConnecting) return;
+
+    _isConnecting = true;
+    notifyListeners();
+
+    try {
+      // Check if WiFi is available
+      final connected = await _checkWiFiConnectivity();
+
+      if (connected) {
+        _connectionType = ConnectionType.wifi;
+        _connectionController.add(true);
+
+        // Save connection type preference
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(prefConnectionType, 'wifi');
+
+        notifyListeners();
+        debugPrint('Connected via WiFi');
+      } else {
+        throw Exception(
+          'Cannot connect to ESP32 WiFi. Please connect to ESP32 WiFi AP first.',
+        );
+      }
+    } finally {
+      _isConnecting = false;
+      notifyListeners();
+    }
+  }
+
+  /// Load saved connection type preference
+  Future<void> _loadConnectionType() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedType = prefs.getString(prefConnectionType);
+    if (savedType == 'wifi') {
+      // Check WiFi on startup
+      await _checkWiFiConnectivity();
+    }
+  }
+
+  void _startConnectionWatchdog() {
+    _connectionWatchdog?.cancel();
+    _connectionWatchdog = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (!isConnected) return;
+
+      try {
+        // Try to send a ping to verify connection
+        await ping(timeoutMs: 1000);
+      } catch (e) {
+        debugPrint('Connection watchdog: ping failed: $e');
+        _handleDisconnect();
+      }
+    });
+  }
+
+  Future<void> _requestPermissions() async {
+    try {
+      // Request Bluetooth to be enabled
+      await _bluetooth.requestEnable();
+
+      // Request runtime permissions for Android 12+
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        final bluetoothScan = await Permission.bluetoothScan.status;
+        final bluetoothConnect = await Permission.bluetoothConnect.status;
+        final location = await Permission.location.status;
+
+        if (!bluetoothScan.isGranted ||
+            !bluetoothConnect.isGranted ||
+            !location.isGranted) {
+          final statuses = await [
+            Permission.bluetoothScan,
+            Permission.bluetoothConnect,
+            Permission.location,
+          ].request();
+
+          if (statuses[Permission.bluetoothScan] == PermissionStatus.denied ||
+              statuses[Permission.bluetoothConnect] ==
+                  PermissionStatus.denied ||
+              statuses[Permission.location] == PermissionStatus.denied) {
+            throw PlatformException(
+              code: 'PERMISSION_DENIED',
+              message: 'Required permissions were not granted',
+            );
+          }
+        }
+      }
+    } on PlatformException catch (e) {
+      if (e.code == 'PERMISSION_DENIED') {
+        debugPrint('Bluetooth/Location permissions denied: ${e.message}');
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _tryAutoReconnect() async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastAddr = prefs.getString(prefLastDeviceAddress);
+    if (lastAddr == null) return;
+
+    try {
+      // Check permissions before attempting reconnect
+      await _requestPermissions();
+
+      final bonded = await _bluetooth.getBondedDevices();
+      final device = bonded.firstWhere(
+        (d) => d.address == lastAddr,
+        orElse: () => BluetoothDevice(
+          address: lastAddr,
+          name: prefs.getString(prefLastDeviceName),
+          type: BluetoothDeviceType.unknown,
+        ),
+      );
+      _lastDevice = device;
+      await connectToDevice(device);
+    } catch (e) {
+      debugPrint('Auto-reconnect failed: $e');
+      // ignore auto-reconnect issues
+    }
+  }
+
+  Future<List<BluetoothDevice>> scanForDevices({
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    if (_isScanning) return [];
+
+    // Request permissions and check Bluetooth state
+    try {
+      await _requestPermissions();
+    } catch (e) {
+      throw Exception('Required permissions not granted: $e');
+    }
+
+    if (_btState != BluetoothState.STATE_ON) {
+      throw Exception('Bluetooth is not enabled');
+    }
+
+    _isScanning = true;
+    notifyListeners();
+
+    final completer = Completer<List<BluetoothDevice>>();
+    final List<BluetoothDevice> found = [];
+    StreamSubscription<BluetoothDiscoveryResult>? sub;
+
+    try {
+      sub = _bluetooth.startDiscovery().listen((result) {
+        final device = result.device;
+        if (!found.any((d) => d.address == device.address)) {
+          found.add(device);
+          notifyListeners(); // Notify UI of new device
+        }
+      });
+
+      // stop after timeout
+      Future.delayed(timeout, () async {
+        await sub?.cancel();
+        _bluetooth.cancelDiscovery();
+        if (!completer.isCompleted) completer.complete(found);
+      });
+
+      final devices = await completer.future;
+      return devices;
+    } on PlatformException catch (e) {
+      if (e.code == 'PERMISSION_DENIED') {
+        throw Exception(
+          'Bluetooth scan permission denied. Please enable location permissions.',
+        );
+      }
+      rethrow;
+    } finally {
+      _isScanning = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> connectToDevice(BluetoothDevice device) async {
+    if (isConnected || _isConnecting) return;
+    _isConnecting = true;
+    notifyListeners();
+    try {
+      if (device.isBonded == false) {
+        await _bluetooth.bondDeviceAtAddress(device.address);
+      }
+      _connection = await BluetoothConnection.toAddress(device.address);
+      _connectionType = ConnectionType.bluetooth;
+      _connectionController.add(true);
+      _listenIncoming();
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(prefLastDeviceAddress, device.address);
+      await prefs.setString(prefLastDeviceName, device.name ?? '');
+      await prefs.setString(prefConnectionType, 'bluetooth');
+      _lastDevice = device;
+
+      // Get initial status
+      await requestStatus();
+
+      // Apply saved telemetry settings
+      await setTelemetry(
+        enabled: _telemetryEnabled,
+        intervalMs: _telemetryIntervalMs,
+      );
+
+      // Verify firmware version via PING
+      try {
+        final resp = await ping(timeoutMs: 2000);
+        debugPrint('Ping response: $resp');
+      } catch (_) {
+        debugPrint('Ping failed or timed out');
+      }
+
+      // Restore last turbo state if enabled
+      if (_turboEnabled) {
+        await setTurbo(enabled: true);
+      }
+    } finally {
+      _isConnecting = false;
+      notifyListeners();
+    }
+  }
+
+  void _handleDisconnect() async {
+    if (_connection == null) return;
+
+    debugPrint('Handling disconnect...');
+    await disconnect();
+
+    // Try to reconnect if we have a last device
+    if (_lastDevice != null && _reconnectAttempts < maxReconnectAttempts) {
+      _reconnectAttempts++;
+      debugPrint('Attempting reconnect (attempt $_reconnectAttempts)...');
+      try {
+        await Future.delayed(const Duration(seconds: 2));
+        await connectToDevice(_lastDevice!);
+        _reconnectAttempts = 0; // Reset on successful connection
+      } catch (e) {
+        debugPrint('Reconnect attempt failed: $e');
+      }
+    }
+  }
+
+  Future<void> disconnect() async {
+    _reconnectAttempts = 0; // Reset attempts on manual disconnect
+
+    if (_connectionType == ConnectionType.wifi) {
+      // WiFi disconnect - just update state
+      _connectionType = ConnectionType.none;
+      _isWiFiConnected = false;
+      _connectionController.add(false);
+      notifyListeners();
+
+      // Clear saved connection type
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(prefConnectionType);
+      return;
+    }
+
+    // Bluetooth disconnect
+    try {
+      await _inputSubscription?.cancel();
+      await _connection?.close();
+    } catch (e) {
+      debugPrint('Error during disconnect: $e');
+    } finally {
+      _connection = null;
+      _connectionType = ConnectionType.none;
+      _connectionController.add(false);
+      _byteBuffer.clear(); // Clear any partial data
+      notifyListeners();
+    }
+  }
+
+  void _listenIncoming() {
+    _inputSubscription?.cancel(); // Cancel any existing subscription
+
+    _inputSubscription = _connection?.input?.listen(
+      (Uint8List data) {
+        try {
+          // Append incoming bytes and process complete lines only.
+          _byteBuffer.addAll(data);
+          _drainBufferLinesBytes();
+        } catch (e) {
+          debugPrint('Error processing incoming data: $e');
+          // Clear buffer on error to prevent corrupted state
+          _byteBuffer.clear();
+        }
+      },
+      onDone: () {
+        debugPrint('Bluetooth input stream closed');
+        _handleDisconnect();
+      },
+      onError: (error) {
+        debugPrint('Bluetooth input stream error: $error');
+        _handleDisconnect();
+      },
+      cancelOnError: false, // Let us handle the error and potential reconnect
+    );
+  }
+
+  void _drainBufferLinesBytes() {
+    // Process complete lines (terminated by LF). Leave partial tail in buffer.
+    while (true) {
+      final lfIndex = _byteBuffer.indexOf(10); // \n
+      if (lfIndex == -1) break;
+
+      // Extract one line (up to LF)
+      final lineBytes = _byteBuffer.sublist(0, lfIndex);
+      // Remove the processed bytes and the LF
+      _byteBuffer.removeRange(0, lfIndex + 1);
+
+      // Trim possible trailing CR
+      if (lineBytes.isNotEmpty && lineBytes.last == 13) {
+        lineBytes.removeLast();
+      }
+
+      String line;
+      try {
+        line = utf8.decode(lineBytes);
+      } catch (e) {
+        // Fallback to allowMalformed to avoid dropping data
+        line = utf8.decode(lineBytes, allowMalformed: true);
+      }
+
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+
+      // Detect ping / version responses like: OK ROVER V3.2
+      if (trimmed.startsWith('OK ROVER') || trimmed.startsWith('OK ROVER')) {
+        try {
+          _pingCompleter?.complete(trimmed);
+        } catch (_) {}
+        // still allow processing below if it's JSON-like
+      }
+
+      // Try parsing as status
+      final status = FirmwareStatus.tryParse(trimmed);
+      if (status != null) {
+        _lastStatus = status;
+        _statusController.add(status);
+        continue;
+      }
+
+      // Try parsing as telemetry
+      final telemetry = RoverTelemetry.tryParse(trimmed);
+      if (telemetry != null) {
+        _lastTelemetry = telemetry;
+        _telemetryController.add(telemetry);
+        continue;
+      }
+
+      // Non-JSON line (e.g. "OK" or other responses)
+      debugPrint('Rover: $trimmed');
+    }
+  }
+
+  Future<void> sendCommand(String cmd) async {
+    if (!isConnected) return;
+    final bytes = utf8.encode('${cmd.trim()}\n');
+    _connection!.output.add(Uint8List.fromList(bytes));
+    await _connection!.output.allSent;
+  }
+
+  /// Send HTTP command to ESP32 rover controller
+  /// Format: http://192.168.4.1/control?cmd=COMMAND
+  Future<void> sendHttpCommand(String command) async {
+    try {
+      final uri = Uri.parse('$httpControlUrl?cmd=$command');
+      final response = await http
+          .get(uri)
+          .timeout(
+            const Duration(seconds: 2),
+            onTimeout: () {
+              throw TimeoutException('HTTP command timed out');
+            },
+          );
+
+      if (response.statusCode != 200) {
+        debugPrint('HTTP command failed: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('HTTP command error: $e');
+      // Don't throw - allow graceful failure for movement commands
+    }
+  }
+
+  // v2.0 Commands
+  Future<void> requestStatus() => sendCommand('STATUS');
+  Future<void> setTurbo({required bool enabled}) async {
+    // Firmware expects lowercase 'on'/'off'
+    await sendCommand(enabled ? 'TURBO on' : 'TURBO off');
+    await requestStatus(); // get confirmation
+    _turboEnabled = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(prefTurboEnabled, enabled);
+    notifyListeners();
+  }
+
+  Future<void> startCalibration() async {
+    _isCalibrating = true;
+    notifyListeners();
+    await sendCommand('CALIBRATE');
+    // Give time for calibration to complete
+    await Future.delayed(const Duration(seconds: 5));
+    _isCalibrating = false;
+    notifyListeners();
+  }
+
+  Future<void> requestBatteryStatus() => sendCommand('BATTERY');
+  Future<String> ping({int timeoutMs = 2000}) async {
+    if (!isConnected) throw Exception('Not connected');
+    // prepare completer
+    _pingCompleter = Completer<String>();
+    await sendCommand('PING');
+    try {
+      final res = await _pingCompleter!.future.timeout(
+        Duration(milliseconds: timeoutMs),
+      );
+      _pingCompleter = null;
+      return res;
+    } catch (e) {
+      _pingCompleter = null;
+      rethrow;
+    }
+  }
+
+  // Telemetry Control
+  Future<void> setTelemetry({required bool enabled, int? intervalMs}) async {
+    _telemetryEnabled = enabled;
+    if (intervalMs != null) _telemetryIntervalMs = intervalMs;
+    if (!isConnected) return;
+
+    // Firmware expects: 'TELEMETRY on interval=3000' or 'TELEMETRY off'
+    if (enabled) {
+      await sendCommand('TELEMETRY on interval=$_telemetryIntervalMs');
+    } else {
+      await sendCommand('TELEMETRY off');
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(prefTelemetryEnabled, enabled);
+    await prefs.setInt(prefTelemetryInterval, _telemetryIntervalMs);
+    notifyListeners();
+  }
+
+  // Base Movement Commands (HTTP-based)
+  /// Move forward - both motors spin forward
+  Future<void> driveForward(int speed) => sendHttpCommand('FORWARD');
+
+  /// Move backward - both motors spin in reverse
+  Future<void> driveBackward(int speed) => sendHttpCommand('BACKWARD');
+
+  /// Turn left - right motor forward, left motor backward
+  Future<void> turnLeft() => sendHttpCommand('LEFT');
+
+  /// Turn right - left motor forward, right motor backward
+  Future<void> turnRight() => sendHttpCommand('RIGHT');
+
+  /// Stop all motors immediately
+  Future<void> stopAll() => sendHttpCommand('STOP');
+
+  // Legacy steering method (maps to LEFT/RIGHT based on angle)
+  Future<void> steer(int angle) {
+    // Convert angle to LEFT/RIGHT: 0-89 = LEFT, 91-180 = RIGHT, 90 = STOP
+    if (angle < 90) {
+      return sendHttpCommand('LEFT');
+    } else if (angle > 90) {
+      return sendHttpCommand('RIGHT');
+    } else {
+      return sendHttpCommand('STOP');
+    }
+  }
+
+  // Legacy stop methods
+  Future<void> stopDrive() => sendHttpCommand('STOP');
+  Future<void> stopSteer() => sendHttpCommand('STOP');
+
+  @override
+  void dispose() {
+    _connectionWatchdog?.cancel();
+    _wifiCheckTimer?.cancel();
+    _reconnectAttempts = 0;
+
+    try {
+      _inputSubscription?.cancel();
+      _connection?.close();
+    } catch (e) {
+      debugPrint('Error during dispose: $e');
+    }
+
+    // Clear all buffers and state
+    _byteBuffer.clear();
+    _pingCompleter = null;
+
+    // Close all stream controllers
+    _telemetryController.close();
+    _statusController.close();
+    _connectionController.close();
+
+    super.dispose();
+  }
+}

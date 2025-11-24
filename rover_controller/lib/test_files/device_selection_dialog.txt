@@ -1,0 +1,147 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:provider/provider.dart';
+import '../services/bluetooth_service.dart';
+
+class DeviceSelectionDialog extends StatefulWidget {
+  const DeviceSelectionDialog({super.key});
+
+  @override
+  State<DeviceSelectionDialog> createState() => _DeviceSelectionDialogState();
+}
+
+class _DeviceSelectionDialogState extends State<DeviceSelectionDialog> {
+  List<BluetoothDevice>? _devices;
+  String? _error;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _startScan();
+  }
+
+  Future<void> _startScan() async {
+    final bt = context.read<BluetoothService>();
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+
+    try {
+      final devices = await bt.scanForDevices();
+      if (mounted) {
+        setState(() {
+          _devices = devices;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bt = context.watch<BluetoothService>();
+
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Text('Select Device'),
+          const Spacer(),
+          if (_isLoading)
+            const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: _startScan,
+              tooltip: 'Refresh',
+            ),
+        ],
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: _error != null
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.error_outline,
+                      color: Colors.red,
+                      size: 48,
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      _error!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      onPressed: _startScan,
+                      child: const Text('Try Again'),
+                    ),
+                  ],
+                ),
+              )
+            : _devices == null || _devices!.isEmpty
+            ? const Center(
+                child: Text(
+                  'No devices found.\nMake sure Bluetooth is enabled and devices are in range.',
+                  textAlign: TextAlign.center,
+                ),
+              )
+            : ListView.builder(
+                shrinkWrap: true,
+                itemCount: _devices!.length,
+                itemBuilder: (context, index) {
+                  final device = _devices![index];
+                  final isEsp32Rover =
+                      (device.name ?? '').trim() ==
+                      BluetoothService.targetDeviceName;
+
+                  return ListTile(
+                    leading: Icon(
+                      Icons.bluetooth,
+                      color: isEsp32Rover ? Colors.blue : null,
+                    ),
+                    title: Text(
+                      device.name ?? 'Unknown Device',
+                      style: TextStyle(
+                        fontWeight: isEsp32Rover
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                      ),
+                    ),
+                    subtitle: Text(device.address),
+                    trailing: isEsp32Rover
+                        ? const Icon(Icons.check_circle, color: Colors.green)
+                        : null,
+                    enabled: !bt.isConnecting,
+                    onTap: () {
+                      Navigator.of(context).pop(device);
+                    },
+                  );
+                },
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
+  }
+}
