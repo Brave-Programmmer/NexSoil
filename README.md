@@ -13,8 +13,6 @@ Supports Bluetooth Classic (SPP) and Wi-Fi AP control with live telemetry, live 
 
 - [Features](#-features)
 - [Repository Structure](#-repository-structure)
-- [Requirements](#-requirements)
-- [Quick Start](#-quick-start)
 - [Usage Guide](#-usage-guide)
 - [Firmware](#-firmware)
 - [Protocol Reference](#-protocol-reference)
@@ -77,6 +75,8 @@ Supports Bluetooth Classic (SPP) and Wi-Fi AP control with live telemetry, live 
 - ESP8266 (ESP-12) or ESP32-CAM module
 - L298N motor driver (for ESP8266 build)
 - DHT11 sensor and soil moisture sensor (optional)
+- 2 DC motors
+- Power Source, max 12v for motor and 5v for microcontrollers ( used by us 2 Lithium-ion 18650 batteries [7.4])
 
 ### Key Dependencies
 
@@ -138,7 +138,7 @@ flutter run --release -d <device-id>
 - **Quick reconnect**: Tap "Reconnect to \<device\>" button (appears after first connection)
 - **Manual reconnect**: Use "Scan & Connect" to choose device again
 
-### Joystick Control
+### Joystick Control ( Currently disabled ) [only Manual drive buttons working]
 
 The joystick sends commands in the format:
 
@@ -167,11 +167,9 @@ Real-time sensor data displays in the Rover Status card:
 - Temperature (°C)
 - Humidity (%)
 - Soil moisture (%)
-- Battery voltage (V)
-- Uptime (seconds)
 
 ---
-
+x
 ## 🤖 Firmware
 
 ### ESP8266 (ESP-12) — WiFi AP Mode
@@ -241,38 +239,6 @@ FRAME_START:<byte_length>
 FRAME_END
 ```
 
-**Commands**:
-
-- `LED_ON` / `LED_OFF` — Control flash LED
-- Responds with acknowledgment messages
-
-**Pin Configuration** (AI-Thinker):
-| Function | GPIO |
-|----------|------|
-| Camera PWDN | 32 |
-| XCLK | 0 |
-| SIOD (SDA) | 26 |
-| SIOC (SCL) | 27 |
-| Y9-Y2 | 35,34,39,36,21,19,18,5 |
-| VSYNC | 25 |
-| HREF | 23 |
-| PCLK | 22 |
-| Flash LED | 4 |
-
-**Flashing**:
-
-1. Connect FTDI adapter (RX→U0T, TX→U0R, GND→GND, 5V→5V)
-2. Hold GPIO0 to GND while resetting/powering
-3. Upload via Arduino IDE (ESP32 board support required)
-4. Remove GPIO0 connection and reset
-
-```bash
-# Or using esptool.py
-python -m esptool --chip esp32 --port COM3 --baud 460800 write_flash -z 0x1000 esp32code.bin
-```
-
----
-
 ## 📡 Protocol Reference
 
 ### Joystick Commands
@@ -309,8 +275,6 @@ PING                  # Connection health check (expects "OK ROVER Vx.y")
   "temp": 23.4, // Temperature (°C)
   "hum": 45.0, // Humidity (%)
   "soil": 33, // Soil moisture (%)
-  "battery": 3.95, // Battery voltage (V)
-  "uptime": 12345 // Uptime (seconds)
 }
 ```
 
@@ -346,28 +310,19 @@ Common GND  ────────────→ All GND pins connected
 - Always share common ground between ESP8266, L298N, and sensors
 - Power motors from battery (6-12V), NOT from ESP8266's 3.3V
 - GPIO16 (D0) has limited PWM capability on some ESP8266 boards
-- Add decoupling capacitors (100µF) across motor terminals
-
 ### ESP32-CAM Module
 
 ```
 ESP32-CAM (AI-Thinker)    FTDI Adapter          Power
 ──────────────────────    ────────────          ─────
 5V    ──────────────────→ 5V (or external)
-GND   ──────────────────→ GND (common)
-U0R (GPIO3) ────────────→ TX
-U0T (GPIO1) ────────────→ RX
-GPIO0 ──────────────────→ GND (flash mode only)
-GPIO4 ──────────────────→ Flash LED
-
-Camera pins are pre-wired internally on the module
+GND   ──────────────────→ GND (common ground with esp12e)
 ```
 
 **Power Requirements**:
 
 - Use stable 5V supply capable of 1-2A
-- Avoid weak USB ports (can cause brownouts)
-- Camera operation is power-intensive
+- Camera operation is power-intensive(300A power draw)
 
 ---
 
@@ -479,34 +434,6 @@ If scanning fails:
 - Try accessing `http://192.168.4.1/` in browser first
 
 ---
-
-## 👨‍💻 Development
-
-### Running Development Build
-
-```bash
-# Debug mode with hot reload
-flutter run -d <device-id>
-
-# Profile mode (performance testing)
-flutter run --profile -d <device-id>
-
-# Release mode (production)
-flutter run --release -d <device-id>
-```
-
-### Code Quality
-
-```bash
-# Static analysis
-flutter analyze
-
-# Format code
-flutter format lib/
-
-# Run tests (when available)
-flutter test
-```
 
 ### Key Files to Modify
 
