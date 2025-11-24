@@ -518,13 +518,6 @@ flutter test
 | `lib/screens/control_screen.dart`     | Main UI layout and controls          |
 | `lib/services/rover_service.dart`     | Rover state management               |
 
-### Adding New Features
-
-1. Follow Provider pattern in `main.dart` for state management
-2. Create services in `lib/services/` for business logic
-3. Create widgets in `lib/widgets/` for reusable UI components
-4. Update `pubspec.yaml` for new dependencies
-
 ### Architecture Notes
 
 - **State Management**: Provider pattern
@@ -542,30 +535,5 @@ flutter test
 - **WiFi AP password**: Change default `12345678` in firmware
 - **HTTP endpoints**: No authentication — add token or basic auth for production
 - **Bluetooth pairing**: Uses standard Android pairing (PIN if required)
-
----
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Areas for improvement:
-
-- [ ] Unit tests for `BluetoothService`
-- [ ] Integration tests with mock Bluetooth
-- [ ] iOS support
-- [ ] Additional camera formats (WebRTC, etc.)
-- [ ] Offline mapping/recording features
-- [ ] Multi-language support
-
-Please open issues or pull requests on the repository.
-
----
-
-## 📞 Support
-
-- **Documentation**: See this README and inline code comments
-- **Issues**: Open an issue on the repository
-- **Firmware docs**: Check `esp12ecode.ino` and `esp32code.ino` headers
 
 ---
